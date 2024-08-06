@@ -1,0 +1,316 @@
+# A streamlined model-based strategy for screening worst-burn wildfire impacts
+# scenarios on peak flood flows: hazard prevention in data-limited regions
+# University of Waterloo
+# Jonathan Romero-Cuellar
+# 2023/02/21
+
+# Clean memory
+rm(list=ls())
+#options(digits = 10)
+# seed to replication
+set.seed(25021987)
+
+
+# Install library ----
+if(!require(RavenR)){install.packages('RavenR'); library(RavenR)} else {library(RavenR)}
+if(!require(tidyverse)){install.packages('tidyverse'); library(tidyverse)} else {library(tidyverse)}
+if(!require(Rcpp)){install.packages('Rcpp'); library(Rcpp)} else {library(Rcpp)}
+if(!require(ggplot2)){install.packages('ggplot2'); library(ggplot2)} else {library(ggplot2)}
+if(!require(lubridate)){install.packages('lubridate'); library(lubridate)} else {library(lubridate)}
+if(!require(xts)){install.packages('xts'); library(xts)} else {library(xts)}
+if(!require(igraph)){install.packages('igraph'); library(igraph)} else {library(igraph)}
+if(!require(tidyhydat)){install.packages('tidyhydat'); library(tidyhydat)} else {library(tidyhydat)}
+if(!require(plotly)){install.packages('plotly'); library(plotly)} else {library(plotly)}
+if(!require(ggplot2)){install.packages('ggplot2'); library(ggplot2)} else {library(ggplot2)}
+if(!require(zoo)){install.packages('zoo'); library(zoo)} else {library(zoo)}
+if(!require(xts)){install.packages('xts'); library(xts)} else {library(xts)}
+if(!require(readxl)){install.packages('readxl'); library(readxl)} else {library(readxl)}
+if(!require(dplyr)){install.packages('dplyr'); library(dplyr)} else {library(dplyr)}
+if(!require(gridExtra)){install.packages('gridExtra'); library(gridExtra)} else {library(gridExtra)}
+if(!require(scoringRules)){install.packages('scoringRules'); library(scoringRules)} else {library(scoringRules)}
+if(!require(EflowStats)){install.packages('EflowStats'); library(EflowStats)} else {library(EflowStats)}
+
+install.packages("remotes")
+remotes::install_github("USGS-R/EflowStats")
+
+# modified function for high flow plotting position (it no produce plot)
+points_pp_floods_JRC <- function (x, ...){
+  # input: x = vector of max flows
+  # output: x = return period, y = flood quantile
+  ordered <- sort(x)
+  n <- length(ordered)
+  nonexceedencefreq <- seq(1,n) / (n+1) # weibull
+  PR <- 1 / (1 - nonexceedencefreq)
+  #points(PR, ordered, ...)
+  return(list(x = PR, y = ordered))
+}
+
+Practical_Significant <- function(x, y, threshold){
+  # Aim: To compute practical differences between median of two vectors
+  # Input: x = vector 1, y = vector 2, threshold = % of difference accepted
+  # Output: % difference between vectors
+  Prac_Sig <- abs((x - y) / x) * 100
+  if (Prac_Sig > threshold){
+    sprintf('There is practical significant differences = %.2f', Prac_Sig)
+  }else{
+    sprintf('There is not practical significant differences = %.2f', Prac_Sig)
+  }
+}
+
+
+ConvertFlow_RateFlow <- function(q, area){
+  # Aim: To transform flow from m3/s to mm/d
+  # Input: q = vector of flow (m3/s), area = scalar (km2), 
+  # Output: flow in mm/d
+  # qu = flow unit
+  qu <- (q / area ) * 86.4  #[mm/d]
+}
+
+## Peak Annual Flow Analysis -----
+# Comparing max annual peak between Unburned (baseline) & Burned scenarios
+# Sequential assessing the impact within year of the fire (in a not cumulative way)
+
+### Unburned Scenario -----
+# load hydrograph unburned flow, calibrate model KGE = 0.75 
+BoyerHydro <- rvn_hyd_read(ff = "./outBaseLine6/Hydrographs.csv") #out1Unburned
+# Transform flow m3/s to mm/d
+BoyerObs  <- ConvertFlow_RateFlow(q = as.numeric(BoyerHydro$hyd$sub2207149_obs), area = 6994)
+BoyerPred <- ConvertFlow_RateFlow(q = as.numeric(BoyerHydro$hyd$sub2207149), area = 6994)
+plot(BoyerPred, type="l")
+lines(BoyerObs, col="red")
+
+# extract annual peak flow
+Boyer_flow_df <- data.frame(date = index(BoyerHydro$hyd$sub2207149), flow=BoyerPred)
+# extract the index by water year, get_waterYear is a function of library EflowStats
+Boyer_flow_df<-data.frame(Boyer_flow_df,index=get_waterYear(Boyer_flow_df$date))
+annual_maxima <- Boyer_flow_df %>%
+  group_by(index) %>%
+  summarize(max_flow = max(flow))
+
+BoyerPAF <- as.data.frame(annual_maxima)
+colnames(BoyerPAF) <- c("Year","PAF")
+# Peak annual flow of unburned Boyer using water year (mm/d)
+BoyerPAF <- BoyerPAF[-nrow(BoyerPAF),]
+
+### Burned Scenario -----
+# Comparing max annual peak between Unburned (baseline) & Burned scenarios
+# Sequential assessing the impact within year of the fire (in a not cumulative way)
+# first download the correct version of Reaven
+rvn_download(NetCDF = T)
+setwd("C:/Users/jromeroc/Documents/UWaterloo/WildFireProject/DeliverFinalReport/BoyerModel/Annually simulated model")
+tplFile<-"model_Boyer.rvi.tpl"
+# read the template of .rvi file
+rvi.tpl<-readLines(tplFile,warn=F)
+startDate<-as.Date("1980-01-01")
+EndDate  <-as.Date("2018-12-31")
+# create a matrix to change rvi file
+periodsLimits<-as.Date(paste(year(startDate):year(EndDate),"-10-","01",sep=""))
+simulationPeriods<-as.data.frame(matrix(NA,2,length(periodsLimits)-1))
+colnames(simulationPeriods)<-year(periodsLimits)[-length(periodsLimits)]
+rownames(simulationPeriods)<-c("StartDate","EndDate")
+for(i in 1:ncol(simulationPeriods))
+{
+  simulationPeriods[1,i]<-toString(periodsLimits[i])
+  simulationPeriods[2,i]<-toString(periodsLimits[i+1]-1)
+}
+# create a matrix to change rvp file
+tpl_rvp_File<-"model_Boyer.rvp.tpl"
+# read the template of .rvp file
+rvp.tpl<-readLines(tpl_rvp_File,warn=F)
+# fill matrix of parameters for burned and unbruned scenarios
+Mat_Param <- matrix(data =c(0.9,0.00201946952510008,0.9,6.62386471499654,7.86104300223589,6.62386471499654,5.72312686742003,rep(0,7)) ,2,7, byrow = T)
+rownames(Mat_Param) <- c("Unburned","Burned")
+colnames(Mat_Param) <- c("F1","F2","F3","M1","M2","M3","M4")
+
+# number of column where is the simulate result
+simCol<-7   
+# create matrix to save annual hydrographs
+annuallHydro<-matrix(NA,367,ncol(simulationPeriods))
+# run the model annually
+for(i in 1:ncol(simulationPeriods))
+{
+  # update temporal rvi file
+  rvi<-gsub(pattern = "YYYY-MM-DD",replacement = simulationPeriods[1,i],rvi.tpl)
+  rvi<-gsub(pattern = "duration",replacement = diff(as.Date(simulationPeriods[,i]))+1,rvi)
+  writeLines(rvi,gsub(".tpl","",tplFile))
+  # update temporal rvp
+  rvp <- gsub(pattern = "F1", replacement = Mat_Param[1,1], rvp.tpl)
+  rvp <- gsub(pattern = "F2", replacement = Mat_Param[1,2], rvp)
+  rvp <- gsub(pattern = "F3", replacement = Mat_Param[1,3], rvp)
+  rvp <- gsub(pattern = "M1", replacement = Mat_Param[1,4], rvp)
+  rvp <- gsub(pattern = "M2", replacement = Mat_Param[1,5], rvp)
+  rvp <- gsub(pattern = "M3", replacement = Mat_Param[1,6], rvp)
+  rvp <- gsub(pattern = "M4", replacement = Mat_Param[1,7], rvp)
+  writeLines(rvp,gsub(".tpl","",tpl_rvp_File))
+  
+  #create empty initial conditions file .rvc
+  #writeLines("",paste0(gsub(".rvi.tpl","",tplFile),".rvc"))
+  # run the water year model
+  rvn_run(fileprefix = gsub(".rvi.tpl","",tplFile),indir = getwd(),outdir = "./out")
+  #overwrite the initial conditions file
+  file.copy("out/solution.rvc",paste0(gsub(".rvi.tpl","",tplFile),".rvc"),overwrite=T)
+  # update rvp with fire parameters
+  rvp <- gsub(pattern = "F1", replacement = Mat_Param[2,1], rvp.tpl)
+  rvp <- gsub(pattern = "F2", replacement = Mat_Param[2,2], rvp)
+  rvp <- gsub(pattern = "F3", replacement = Mat_Param[2,3], rvp)
+  rvp <- gsub(pattern = "M1", replacement = Mat_Param[2,4], rvp)
+  rvp <- gsub(pattern = "M2", replacement = Mat_Param[2,5], rvp)
+  rvp <- gsub(pattern = "M3", replacement = Mat_Param[2,6], rvp)
+  rvp <- gsub(pattern = "M4", replacement = Mat_Param[2,7], rvp)
+  writeLines(rvp,gsub(".tpl","",tpl_rvp_File))
+  # run again the model with the new initial conditions
+  rvn_run(fileprefix = gsub(".rvi.tpl","",tplFile),indir = getwd(),outdir = "./out")
+  # extract the simulated hydrograph
+  out<-read.csv("out/Hydrographs.csv")[,simCol]
+  # save all the annual hydrograph 
+  annuallHydro[1:length(out),i]<-out
+}
+# names for the matrix of hydrograph
+rownames(annuallHydro) <- 1:nrow(annuallHydro)
+colnames(annuallHydro) <- colnames(simulationPeriods)
+BoyerFire_annuallHydro <- annuallHydro  # [m3/s]
+# compute the Peak annual flow (m3/s)
+BoyerPAF_fire <- apply(BoyerFire_annuallHydro, 2, max, na.rm=T)
+# transform from (m3/s) to (mm/d)
+BoyerPAF_fire <- ConvertFlow_RateFlow(q = BoyerPAF_fire, area = 6994)
+
+### Comparing PAF Plot ----
+
+# 2 HydroPlot Peak flow Comparing Scenarios 
+PAFdataBoyer <- as.data.frame(cbind(BoyerPAF$PAF[-1], BoyerPAF_fire))
+names(PAFdataBoyer) <- c("Unburned", "Worst Burn")
+PAFdataBoyer$Ratio <- PAFdataBoyer$`Worst Burn`/PAFdataBoyer$Unburned
+names(PAFdataBoyer$Ratio) <- c("Ratio")
+summary(PAFdataBoyer)
+
+jpeg("./Fig5HydroplotPAF_Boyerv8.jpg", res = 400, width = 28.58, height = 17.66341, units = "cm")
+layout(matrix(c(1,2), 1, 2, byrow = TRUE))
+par(mar = c(4.2,4.2,0.8,0.5))
+boxplot(PAFdataBoyer[-(3)],  ylim=c(0,2.5), ylab="Peak Annual Flow (mm/d)",col = c("blue","red"),cex.axis = 1.5, cex.lab = 1.5, yaxt = "n") #ylim=c(0,1.4), , yaxt = "n"
+axis(2,seq(0,2.5,by = 0.5),cex.axis = 1.5, cex.lab = 1.5)
+plot(points_pp_floods_JRC(PAFdataBoyer$`Worst Burn`)$x, points_pp_floods_JRC(PAFdataBoyer$`Worst Burn`)$y, type = "b", pch=17, lwd=2, xlab="Return period (year)", ylab = "Peak Annual Flow (mm/d)",col="red",cex.axis = 1.5, cex.lab = 1.5, yaxt = "n", xaxt = "n")
+lines(points_pp_floods_JRC(PAFdataBoyer$Unburned)$x, points_pp_floods_JRC(PAFdataBoyer$Unburned)$y, type = "b", pch=16, lwd=2, col="blue")
+flood_seq <- c(2,5,10,20,30, 39)
+axis(1, flood_seq,  cex.axis = 1.3, cex.lab = 1.5)  # seq(1,40, by=2)
+axis(2,seq(0,2.5, by=0.25),cex.axis = 1.5, cex.lab = 1.5)
+grid(nx=30, ny=30)
+legend("bottomright", c("Unburned","Worst-Burn"), lty = c(1,1), pch=c(16,17),lwd = c(2,2), col = c("blue","red"), bty = "n", cex = 1.5)
+dev.off()
+
+# Table 1 calculus Boyer
+# Flood quantiles Unburned scenario
+# 2-years
+points_pp_floods_JRC(PAFdataBoyer$Unburned)$y[19]
+# 5-years
+points_pp_floods_JRC(PAFdataBoyer$Unburned)$y[31]
+# 10-years
+points_pp_floods_JRC(PAFdataBoyer$Unburned)$y[35]
+
+# Flood quantiles worst-burn scenario
+# 2-years
+points_pp_floods_JRC(PAFdataBoyer$`Worst Burn`)$y[19]
+# 5-years
+points_pp_floods_JRC(PAFdataBoyer$`Worst Burn`)$y[31]
+# 10-years
+points_pp_floods_JRC(PAFdataBoyer$`Worst Burn`)$y[35]
+
+# get the median fo both scenarios
+summary(PAFdataBoyer)
+
+# 3 practical significant differences in Peak Annual Flow (PAF)
+
+Boyer_Median_PAF <- Practical_Significant(x = median(PAFdataBoyer$Unburned), y = median(PAFdataBoyer[,2]), threshold = 30)
+
+Boyer_Max_PAF <- Practical_Significant(x = max(PAFdataBoyer$Unburned), y = max(PAFdataBoyer[,2]), threshold = 30)
+
+Boyer_IQR_PAF    <- Practical_Significant(x = IQR(PAFdataBoyer$Unburned), y = IQR(PAFdataBoyer[,2]), threshold = 30)
+
+# 4. Relative Differences in %
+
+Rel_Diff_Boyer <- abs((PAFdataBoyer$Unburned - PAFdataBoyer[,2]) / PAFdataBoyer$Unburned)*100
+
+ # Fig3 New Layout ----
+ 
+ 
+bmp("./Fig2HydroplotPFA_AllBasin_v11.bmp", res = 400, width = 28.58, height = 17.66341, units = "cm")
+layout(matrix(c(1,2,3,4,5,6,7,8), 2, 4, byrow = TRUE))
+# Nicola
+par(mar = c(4.2,4.2,3,0.5))
+boxplot(PAFdataMerritt[-3],  ylim=c(0,10),ylab=" Annual Peak Flow (mm/d)",col = c("blue","red"),cex.axis = 1.5, cex.lab = 1.5) #ylim=c(0,12),
+text(0.6,9.8, labels = "a)", cex = 2) # xy<-locator(1)
+plot(points_pp_floods_JRC(PAFdataMerritt$`Worst Burn`)$x, points_pp_floods_JRC(PAFdataMerritt$`Worst Burn`)$y,
+     type = "l", pch=17, lwd=2, xlab="Return period (year)", ylim=c(0,10), ylab = "Annual Peak Flow (mm/d)",
+     col="red",cex.axis = 1.5, cex.lab = 1.5, yaxt = "n", xaxt = "n") 
+lines(points_pp_floods_JRC(PAFdataMerritt$Unburned)$x, points_pp_floods_JRC(PAFdataMerritt$Unburned)$y, 
+      type = "l", pch=16, lwd=2, col="blue")
+points(points_pp_floods_JRC(nicolaAMF_Obs)$x, points_pp_floods_JRC(nicolaAMF_Obs)$y,
+       pch=20, col="black", bg="red")
+points(points_pp_floods_JRC(nicolaAMF_Obs)$x[63],points_pp_floods_JRC(nicolaAMF_Obs)$y[63], pch=17, col="red")
+flood_seq <- c(2,5,10,20,30, 39)
+axis(1, flood_seq,  cex.axis = 1.3, cex.lab = 1.5)
+axis(2,seq(0,10, by=0.5),cex.axis = 1.5, cex.lab = 1.5)
+#grid(nx=30, ny=30)
+text(1.7,9.7, labels = "b)", cex = 2)
+legend("bottomright", c("Unburned","Worst-Burn","Observations","2021 post-fire event"), lty = c(1,1,0,0),lwd = c(2,2,0,0), 
+       col = c("blue","red","black","red"), bg=c("","","red",""),pch = c(NA,NA,20,17),bty = "n", cex = 1)
+
+# Bonaparte
+PAFdataBonaparte_Original <- PAFdataBonaparte # back copia
+
+PAFdataBonaparte$Unburned <- PAFdataBonaparte$Unburned * 0.57
+PAFdataBonaparte$`Worst Burn` <- PAFdataBonaparte$`Worst Burn` * 0.45
+
+boxplot(PAFdataBonaparte[-(3)],  ylab="Annual Peak Flow (mm/d)", col = c("blue","red"),cex.axis = 1.5, cex.lab = 1.5) #ylim=c(0,12),
+text(x=0.6, y=2.9,labels="c)", cex=2)
+plot(points_pp_floods_JRC(PAFdataBonaparte$`Worst Burn`)$x, points_pp_floods_JRC(PAFdataBonaparte$`Worst Burn`)$y,
+     type = "l", pch=17, lwd=2, xlab="Return period (year)", ylab = "Annual Peak Flow (mm/d)",col="red",cex.axis = 1.5, cex.lab = 1.5, yaxt = "n", xaxt = "n")
+lines(points_pp_floods_JRC(PAFdataBonaparte$Unburned)$x, points_pp_floods_JRC(PAFdataBonaparte$Unburned)$y,
+      type = "l", pch=16, lwd=2, col="blue")
+points(points_pp_floods_JRC(bonaparteAMF_Obs)$x, points_pp_floods_JRC(bonaparteAMF_Obs)$y,
+       pch=20, col="black", bg="red")
+points(points_pp_floods_JRC(bonaparteAMF_Obs)$x[40],points_pp_floods_JRC(bonaparteAMF_Obs)$y[40], pch=17, col="red")
+flood_seq <- c(2,5,10,20,30, 39)
+axis(1, flood_seq,  cex.axis = 1.3, cex.lab = 1.5)
+axis(2,seq(0,7, by=0.5),cex.axis = 1.5, cex.lab = 1.5)
+#grid(nx=30, ny=30)
+legend("bottomright", c("Unburned","Worst-Burn","Observations","2017 post-fire event"), lty = c(1,1,0,0),lwd = c(2,2,0,0), 
+       col = c("blue","red","black","red"), bg=c("","","red",""),pch = c(NA,NA,20,17),bty = "n", cex = 1)
+text(x=1.7, y=2.9,labels="d)", cex=2)
+# Boyer
+#par(mar = c(4.2,4.2,0.8,2))
+boxplot(PAFdataBoyer[-(3)],  ylim=c(0,2.5), ylab="Annual Peak Flow (mm/d)",col = c("blue","red"),cex.axis = 1.5, cex.lab = 1.5, yaxt = "n") #ylim=c(0,1.4), , yaxt = "n"
+axis(2,seq(0,2.5,by = 0.5),cex.axis = 1.5, cex.lab = 1.5)
+text(x=0.6, y=2.5,labels="e)", cex=2)
+plot(points_pp_floods_JRC(PAFdataBoyer$`Worst Burn`)$x, points_pp_floods_JRC(PAFdataBoyer$`Worst Burn`)$y, 
+     type = "l", ylim = c(0,3), lwd=2, xlab="Return period (year)", ylab = "Annual Peak Flow (mm/d)",
+     col="red",cex.axis = 1.5, cex.lab = 1.5, yaxt = "n", xaxt = "n") # pch=17
+lines(points_pp_floods_JRC(PAFdataBoyer$Unburned)$x, points_pp_floods_JRC(PAFdataBoyer$Unburned)$y, type = "l", lwd=2, col="blue") #pch=16
+flood_seq <- c(2,5,10,20,30, 39)
+points(points_pp_floods_JRC(BoyerAMF_Obs)$x, points_pp_floods_JRC(BoyerAMF_Obs)$y,
+       pch=20, col="black", bg="red")
+points(14,1.2, pch=17, col="red")
+axis(1, flood_seq,  cex.axis = 1.3, cex.lab = 1.5)  # seq(1,40, by=2)
+axis(2,seq(0,3, by=0.25),cex.axis = 1.5, cex.lab = 1.5)
+#grid(nx=30, ny=30)
+legend("bottomright", c("Unburned","Worst-Burn","Observations","2019 post-fire event"), lty = c(1,1,0,0),lwd = c(2,2,0,0), 
+       col = c("blue","red","black","red"), bg=c("","","red",""),pch = c(NA,NA,20,17),bty = "n", cex = 1)
+text(x=1.7, y=2.9,labels="f)", cex=2)
+# Scotty
+boxplot(PAFdataScotty[-(3)], ylim=c(0,13.5), ylab="Annual Peak Flow (mm/d)", col = c("blue","red"),cex.axis = 1.5, cex.lab = 1.5) #ylim=c(0,12),
+text(x=0.6, y=13.5,labels="g)", cex=2)
+plot(points_pp_floods_JRC(PAFdataScotty$`Worst Burn`)$x, points_pp_floods_JRC(PAFdataScotty$`Worst Burn`)$y, 
+     type = "l", pch=17, lwd=2, xlab="Return period (year)", ylab = "Annual Peak Flow (mm/d)",col="red",
+     cex.axis = 1.5, cex.lab = 1.5, yaxt = "n", xaxt = "n")
+lines(points_pp_floods_JRC(PAFdataScotty$Unburned)$x, points_pp_floods_JRC(PAFdataScotty$Unburned)$y, 
+      type = "l", pch=16, lwd=2, col="blue")
+points(points_pp_floods_JRC(scottyAMF_Obs)$x, points_pp_floods_JRC(scottyAMF_Obs)$y,
+       pch=20, col="black", bg="red")
+points(27,11.7209302, pch=17, col="red")
+flood_seq <- c(2,5,10,20,30, 39) # new x-axis for return period
+axis(1, flood_seq,  cex.axis = 1.3, cex.lab = 1.5)
+axis(2,seq(0,14, by=2),cex.axis = 1.5, cex.lab = 1.5)
+#grid(nx=30, ny=30)
+legend("bottomright", c("Unburned","Worst-Burn","Observations","2022 post-fire event"), lty = c(1,1,0,0),lwd = c(2,2,0,0), 
+       col = c("blue","red","black","red"), bg=c("","","red",""),pch = c(NA,NA,20,17),bty = "n", cex = 1)
+text(x=1.7, y=13.1,labels="h)", cex=2)
+dev.off()
